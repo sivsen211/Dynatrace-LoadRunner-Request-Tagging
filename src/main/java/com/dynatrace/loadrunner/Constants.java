@@ -19,6 +19,7 @@ public final class Constants {
 	public static final char ASTERISK = '*';
 	public static final char SLASH = '/';
 	public static final char SEMICOLON = ';';
+	public static final char CURLY_LEFT_BRACE = '{';
 	public static final char CURLY_RIGHT_BRACE = '}';
 	public static final char LINE_FEED = '\n';
 	public static final char CARRIAGE_RETURN = '\r';
