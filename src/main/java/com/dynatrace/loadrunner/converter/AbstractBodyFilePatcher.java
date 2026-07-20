@@ -5,7 +5,9 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
@@ -28,7 +30,9 @@ abstract class AbstractBodyFilePatcher extends AbstractFilePatcher {
 	private final char param;
 
 	private final List<String> transactionNames = Lists.newArrayList();
+	private final Map<String, Integer> transactionStartDepths = new HashMap<>();
 	private String currentTransactionName = "";
+	private int braceDepth = 0;
 
 	AbstractBodyFilePatcher(Mode mode, String scriptName, boolean verbose, String regex, String transactionStart,
 			String transactionEnd, Set<String> keywords, Set<String> clickAndScript, char param) {
@@ -51,7 +55,9 @@ abstract class AbstractBodyFilePatcher extends AbstractFilePatcher {
 				System.out.printf("Patching file: %s%n", sourceFile.getAbsolutePath());
 			}
 			transactionNames.clear();
-			FileScanner scanner = new FileScanner(reader);
+			transactionStartDepths.clear();
+			braceDepth = 0;
+			FileScanner scanner = new FileScanner(reader);	
 			scanner.initialize();
 			parseFile(scanner, writer);
 			if(verbose && !transactionNames.isEmpty()) {
@@ -85,40 +91,74 @@ abstract class AbstractBodyFilePatcher extends AbstractFilePatcher {
 	}
 
 	private void handleInsert(FileScanner scanner, PrintWriter writer) {
-		String instructionToWrite = BodyFilePatcherUtil.removeEOF(scanner.getUnmodifiedInstruction().toString());
-		if (scanner.modifiedInstructionContains(transactionStart)) {
-			String transactionName = BodyFilePatcherUtil.getFirstStringParameter(instructionToWrite.substring(instructionToWrite.indexOf(transactionStart)), param).trim();
-			if (StringUtils.isNotBlank(transactionName)) {
-				currentTransactionName = transactionName;
-				transactionNames.add(transactionName);
-			}
-		} else if (scanner.modifiedInstructionContains(transactionEnd)) {
-			String transactionName = BodyFilePatcherUtil.getFirstStringParameter(instructionToWrite.substring(instructionToWrite.indexOf(transactionEnd)), param).trim();
-			if (StringUtils.isNotBlank(transactionName)) {
-				if (verbose && !isCurrentTransaction(transactionName)) {
-					if(currentTransactionName.isEmpty()) {
-						System.out.printf("Invalid '%s', trying to end transaction '%s' which wasn't started yet, or is already closed%n",
-								transactionEnd, transactionName);
-					} else {
-						System.out.printf("Invalid '%s', trying to end transaction '%s' while current transaction is '%s'%n",
-								transactionEnd, transactionName, currentTransactionName);
-					}
-				}
-				transactionNames.remove(transactionName);
-				currentTransactionName = transactionNames.isEmpty() ? "" : transactionNames.get(transactionNames.size() - 1);
-			}
-		} else {
-			String keyword = processKeywords(scanner.getModifiedInstruction().toString());
-			if (StringUtils.isNotBlank(keyword)) {
-				String processedPage = BodyFilePatcherUtil
-						.getFirstStringParameter(scanner.getModifiedInstruction().toString(), param);
-				instructionToWrite = modifyInstruction(instructionToWrite, scanner.getWhiteSpace().toString(), keyword,
-						processedPage);
-			}
-		}
-		writer.write(instructionToWrite);
-	}
+    String instructionToWrite = BodyFilePatcherUtil.removeEOF(scanner.getUnmodifiedInstruction().toString());
+    String instructionsWithoutComments = BodyFilePatcherUtil.removeEOF(scanner.getUnmodifiedInstructionWithoutComments().toString());
+    String modInstr = scanner.getModifiedInstruction().toString();
 
+    // Count opening braces absorbed into this instruction (they are not terminators
+    // so they get consumed mid-instruction). Closing braces always terminate an
+    // instruction, so the net depth change per instruction is:
+    //   opens - (1 if terminated by '}', else 0)
+    int openBraces = countChar(modInstr, Constants.CURLY_LEFT_BRACE);
+    boolean closedByBrace = modInstr.length() > 0
+            && modInstr.charAt(modInstr.length() - 1) == Constants.CURLY_RIGHT_BRACE;
+
+    if (scanner.modifiedInstructionContains(transactionStart)) {
+        String transactionName = BodyFilePatcherUtil.getFirstStringParameter(instructionsWithoutComments.substring(instructionsWithoutComments.indexOf(transactionStart)), param).trim();
+        if (StringUtils.isNotBlank(transactionName)) {
+            currentTransactionName = transactionName;
+            transactionNames.add(transactionName);
+            transactionStartDepths.put(transactionName, braceDepth);
+        }
+    } else if (scanner.modifiedInstructionContains(transactionEnd)) {
+        String transactionName = BodyFilePatcherUtil.getFirstStringParameter(instructionsWithoutComments.substring(instructionsWithoutComments.indexOf(transactionEnd)), param).trim();
+        if (StringUtils.isNotBlank(transactionName)) {
+            int startDepth = transactionStartDepths.getOrDefault(transactionName, 0);
+            // Only close the transaction when we are at or above the depth it was opened.
+            // A deeper nesting level means this lr_end_transaction is inside a conditional
+            // early-exit block (e.g. an error-handling if-branch) and the transaction
+            // remains active on the normal code path.
+            if (braceDepth <= startDepth) {
+                if (verbose && !isCurrentTransaction(transactionName)) {
+                    if (currentTransactionName.isEmpty()) {
+                        System.out.printf("Invalid '%s', trying to end transaction '%s' which wasn't started yet, or is already closed%n",
+                                transactionEnd, transactionName);
+                    } else {
+                        System.out.printf("Invalid '%s', trying to end transaction '%s' while current transaction is '%s'%n",
+                                transactionEnd, transactionName, currentTransactionName);
+                    }
+                }
+                transactionNames.remove(transactionName);
+                transactionStartDepths.remove(transactionName);
+                currentTransactionName = transactionNames.isEmpty() ? "" : transactionNames.get(transactionNames.size() - 1);
+            }
+        }
+    } else {
+        String keyword = processKeywords(modInstr);
+        if (StringUtils.isNotBlank(keyword)) {
+            String processedPage = BodyFilePatcherUtil
+                    .getFirstStringParameter(modInstr, param);
+            instructionToWrite = modifyInstruction(instructionToWrite, scanner.getWhiteSpace().toString(), keyword,
+                    processedPage);
+        }
+    }
+
+    // Update brace depth after processing this instruction
+    braceDepth += openBraces;
+    if (closedByBrace) {
+        braceDepth--;
+    }
+
+    writer.write(instructionToWrite);
+}
+
+private static int countChar(String s, char target) {
+    int count = 0;
+    for (int i = 0; i < s.length(); i++) {
+        if (s.charAt(i) == target) count++;
+    }
+    return count;
+}
 	private boolean isCurrentTransaction(String transactionName) {
 		return currentTransactionName.equalsIgnoreCase(transactionName);
 	}
