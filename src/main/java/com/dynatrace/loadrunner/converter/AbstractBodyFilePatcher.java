@@ -92,7 +92,7 @@ abstract class AbstractBodyFilePatcher extends AbstractFilePatcher {
 
 	private void handleInsert(FileScanner scanner, PrintWriter writer) {
     String instructionToWrite = BodyFilePatcherUtil.removeEOF(scanner.getUnmodifiedInstruction().toString());
-    String instructionsWithoutComments = BodyFilePatcherUtil.removeEOF(scanner.getUnmodifiedInstructionWithoutComments().toString());
+    String instructionsWithoutComments = BodyFilePatcherUtil.removeEOF(scanner.getUnmodifiedInstruction().toString());
     String modInstr = scanner.getModifiedInstruction().toString();
 
     // Count opening braces absorbed into this instruction (they are not terminators
